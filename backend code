@@ -1,0 +1,227 @@
+// backend/server.js
+// Express backend for AI Tutor (skeleton + working PDF ingestion)
+// Replace TODOs with your Vertex AI integration.
+
+const express = require('express');
+const bodyParser = require('body-parser');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+const pdf = require('pdf-parse');
+const admin = require('firebase-admin');
+
+// Initialize Firebase Admin (for Firestore storage)
+// Make sure GOOGLE_APPLICATION_CREDENTIALS env var points to your service account key
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
+    storageBucket: process.env.GCS_BUCKET || undefined
+  });
+}
+const firestore = admin.firestore();
+
+const upload = multer({ dest: 'uploads/' });
+const app = express();
+app.use(bodyParser.json());
+
+const PORT = process.env.PORT || 8080;
+
+// Simple healthcheck
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// 1) Upload endpoint: teacher uploads PDF -> extract text -> chunk -> store chunks in Firestore
+app.post('/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const raw = fs.readFileSync(req.file.path);
+    const data = await pdf(raw);
+    const text = data.text || '';
+
+    // Basic chunking (split by paragraphs -> approximate tokens)
+    const chunks = chunkText(text, 800, 100);
+
+    // Save chunks to Firestore under collection `documents/{docId}/chunks`
+    const docRef = firestore.collection('documents').doc();
+    await docRef.set({
+      filename: req.file.originalname,
+      uploadedAt: new Date().toISOString(),
+    });
+
+    const batch = firestore.batch();
+    chunks.forEach((c, i) => {
+      const chRef = docRef.collection('chunks').doc(String(i));
+      batch.set(chRef, { text: c, index: i });
+    });
+    await batch.commit();
+
+    // TODO: create embeddings for each chunk and insert into your vector DB or Vertex Semantic Index
+    // await createEmbeddingsAndIndex(chunks, docRef.id);
+
+    // cleanup uploaded file
+    fs.unlinkSync(req.file.path);
+
+    res.json({ success: true, docId: docRef.id, chunks: chunks.length });
+  } catch (err) {
+    console.error('upload error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2) Chat endpoint: accepts { userId, message }
+// It should: run semantic search to fetch relevant chunks, then call your Vertex AI Agent with the context
+app.post('/chat', async (req, res) => {
+  try {
+    const { userId, message } = req.body;
+    if (!message) return res.status(400).json({ error: 'message required' });
+
+    // TODO: run semantic search against your vector index to get top-k chunks
+    // const contexts = await semanticSearch(message, 4);
+    const contexts = await getDummyContexts(); // placeholder until you implement semanticSearch
+
+    // TODO: call Vertex AI Agent with user message + contexts. Implement callVertexAgent below.
+    // const reply = await callVertexAgent({ userId, message, contexts });
+    const reply = buildMockReply(message, contexts);
+
+    // Optionally store conversation in Firestore
+    const convRef = firestore.collection('conversations').doc();
+    await convRef.set({ userId, message, reply, createdAt: new Date().toISOString() });
+
+    res.json({ reply });
+  } catch (err) {
+    console.error('chat error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3) Generate quiz endpoint: { topic, docId }
+app.post('/generate-quiz', async (req, res) => {
+  try {
+    const { topic, docId } = req.body;
+    if (!topic) return res.status(400).json({ error: 'topic required' });
+
+    // TODO: fetch context chunks (via semantic search or docId -> chunks) and pass to a quiz-generation model/tool
+    // const contexts = await semanticSearch(topic, 6);
+    const contexts = await getDummyContexts();
+
+    // TODO: replace with real model call
+    // const quiz = await generateQuizUsingVertex(contexts, topic);
+    const quiz = mockGenerateQuiz(topic);
+
+    // store quiz
+    const qRef = firestore.collection('quizzes').doc();
+    await qRef.set({ topic, quiz, createdAt: new Date().toISOString() });
+
+    res.json({ quizId: qRef.id, quiz });
+  } catch (err) {
+    console.error('quiz error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Basic helpers
+function chunkText(text, maxSize = 800, overlap = 100) {
+  // naive chunk by sentences / newlines
+  const paragraphs = text.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+  const chunks = [];
+  let buffer = '';
+  for (const p of paragraphs) {
+    if ((buffer + '\n\n' + p).length > maxSize) {
+      if (buffer) chunks.push(buffer);
+      buffer = p;
+    } else {
+      buffer = buffer ? buffer + '\n\n' + p : p;
+    }
+  }
+  if (buffer) chunks.push(buffer);
+  // naive overlap: not implemented precisely — keep simple for MVP
+  return chunks;
+}
+
+function buildMockReply(userMessage, contexts) {
+  return `Mock reply to: "${userMessage}"\n\nI used the following snippets: ${contexts.map((c, i) => `[${i}] ${c.slice(0,80)}...`).join('\n')}`;
+}
+
+function mockGenerateQuiz(topic) {
+  return {
+    title: `Quiz on ${topic}`,
+    questions: [
+      { id: 1, type: 'mcq', q: `What is a core idea of ${topic}?`, options: ['A', 'B', 'C', 'D'], answer: 'A' },
+      { id: 2, type: 'short', q: `Explain ${topic} in one sentence.`, answer: '...' },
+      { id: 3, type: 'mcq', q: `Which option best describes ${topic}?`, options: ['X', 'Y', 'Z'], answer: 'Y' }
+    ]
+  };
+}
+
+async function getDummyContexts() {
+  // Pull a couple of chunks from any document for demo; in real app use your vector search
+  const docs = await firestore.collection('documents').limit(1).get();
+  if (docs.empty) return ['No indexed content found. Please upload a PDF.'];
+  const doc = docs.docs[0];
+  const chunksSnap = await doc.ref.collection('chunks').limit(3).get();
+  if (chunksSnap.empty) return ['No chunks found in document.'];
+  return chunksSnap.docs.map(d => d.data().text);
+}
+
+// Placeholder functions to show where Vertex AI / vector DB calls go
+// Implement these using Vertex AI client libraries or REST APIs and your chosen vector store.
+
+async function semanticSearch(query, topK = 5) {
+  // 1) embed the query (Vertex Embeddings)
+  // 2) run similarity search against your vector DB or Vertex Semantic Search
+  // 3) return topK chunk texts with metadata
+  throw new Error('semanticSearch() not implemented. Use Vertex embeddings + vector DB.');
+}
+
+async function createEmbeddingsAndIndex(chunks, docId) {
+  // Use Vertex Embeddings API to create embeddings, then insert into Vertex Semantic Search or another vector DB
+  // Each entry should save: {embedding, text, docId, chunkIndex, page}
+  throw new Error('createEmbeddingsAndIndex() not implemented.');
+}
+
+async function callVertexAgent({ userId, message, contexts }) {
+  // Call Vertex AI Agent or Generative Model with a system prompt + contexts + user message
+  // Follow Vertex AI docs for the exact client usage. Example pseudocode:
+  // const client = new VertexClient();
+  // const response = await client.generate({model: 'models/gpt-4o-mini', input: composedPrompt});
+  // return response.text;
+  throw new Error('callVertexAgent() not implemented.');
+}
+
+// Start server
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+
+
+/*
+=====================================================================
+Additional files (save to backend/):
+
+1) package.json
+{
+  "name": "ai-tutor-backend",
+  "version": "0.1.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "body-parser": "^1.20.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "firebase-admin": "^11.5.0"
+  }
+}
+
+2) ingestion.js (optional helper) - shows PDF extraction + Vertex embedding pseudocode
+// See comments in server.js for where to implement embedding calls.
+
+3) quizGenerator.js - a utility that formats prompt templates for quiz generation
+// Use prompt templates + call Vertex text generation to produce quiz JSON
+
+=====================================================================
+Notes:
+- Replace TODOs with Vertex AI SDK calls. Use GOOGLE_APPLICATION_CREDENTIALS for auth or run on GCP with Workload Identity.
+- For production, use streaming uploads to GCS and Cloud Functions to process files asynchronously.
+- Add proper error handling, request validation, authentication (Firebase Auth token verification), and rate limiting.
+*/
