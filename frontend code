@@ -1,0 +1,262 @@
+// Frontend React App for AI Tutor (simplified)
+// Folder structure (frontend/)
+/*
+frontend/
+├── package.json
+├── public/
+│   └── index.html
+└── src/
+    ├── index.js
+    ├── App.js
+    ├── firebase.js
+    ├── components/
+    │   ├── ChatUI.jsx
+    │   ├── FileUpload.jsx
+    │   └── QuizUI.jsx
+    └── styles.css
+*/
+
+// package.json
+{
+  "name": "ai-tutor-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "firebase": "^9.22.2"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  }
+}
+
+// public/index.html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Tutor</title>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
+
+// src/index.js
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+import './styles.css';
+
+const container = document.getElementById('root');
+const root = createRoot(container);
+root.render(<App />);
+
+// src/firebase.js
+// Initialize Firebase app (replace config with your project's values)
+import { initializeApp } from 'firebase/app';
+import { getAuth } from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
+
+const firebaseConfig = {
+  apiKey: process.env.REACT_APP_FIREBASE_API_KEY || 'YOUR_API_KEY',
+  authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN || 'YOUR_PROJECT.firebaseapp.com',
+  projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID || 'YOUR_PROJECT_ID',
+  storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET || 'YOUR_PROJECT.appspot.com',
+  messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID || '',
+  appId: process.env.REACT_APP_FIREBASE_APP_ID || ''
+};
+
+const app = initializeApp(firebaseConfig);
+export const auth = getAuth(app);
+export const db = getFirestore(app);
+
+// src/App.js
+import React from 'react';
+import ChatUI from './components/ChatUI';
+import FileUpload from './components/FileUpload';
+import QuizUI from './components/QuizUI';
+
+export default function App() {
+  return (
+    <div className="app-root">
+      <header className="app-header">
+        <h1>AI Tutor Agent</h1>
+      </header>
+      <main className="app-main">
+        <div className="left-panel">
+          <FileUpload />
+          <QuizUI />
+        </div>
+        <div className="right-panel">
+          <ChatUI />
+        </div>
+      </main>
+    </div>
+  );
+}
+
+// src/components/ChatUI.jsx
+import React, { useState, useRef, useEffect } from 'react';
+
+export default function ChatUI() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef();
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const sendMessage = async () => {
+    if (!input.trim()) return;
+    const userMsg = { sender: 'user', text: input };
+    setMessages(prev => [...prev, userMsg]);
+    setLoading(true);
+    setInput('');
+
+    try {
+      const resp = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: 'demo-user', message: userMsg.text })
+      });
+      const data = await resp.json();
+      const botMsg = { sender: 'bot', text: data.reply };
+      setMessages(prev => [...prev, botMsg]);
+    } catch (err) {
+      setMessages(prev => [...prev, { sender: 'bot', text: 'Error contacting server.' }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  return (
+    <div className="chat-container">
+      <div className="messages">
+        {messages.map((m, i) => (
+          <div key={i} className={`message ${m.sender}`}>
+            <div className="message-text">{m.text}</div>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+      <div className="chat-input">
+        <textarea placeholder="Ask a question..." value={input} onChange={e => setInput(e.target.value)} onKeyDown={onKeyDown} />
+        <button onClick={sendMessage} disabled={loading}>{loading ? '...' : 'Send'}</button>
+      </div>
+    </div>
+  );
+}
+
+// src/components/FileUpload.jsx
+import React, { useState } from 'react';
+
+export default function FileUpload() {
+  const [file, setFile] = useState(null);
+  const [status, setStatus] = useState('');
+
+  const upload = async () => {
+    if (!file) return setStatus('Select a file first');
+    setStatus('Uploading...');
+    const form = new FormData();
+    form.append('file', file);
+
+    try {
+      const resp = await fetch('/upload', { method: 'POST', body: form });
+      const data = await resp.json();
+      if (data.success) setStatus(`Uploaded: ${data.chunks} chunks indexed (docId: ${data.docId})`);
+      else setStatus('Upload failed');
+    } catch (err) {
+      setStatus('Error uploading file');
+    }
+  };
+
+  return (
+    <div className="file-upload">
+      <h3>Upload Study Material (PDF)</h3>
+      <input type="file" accept="application/pdf" onChange={e => setFile(e.target.files[0])} />
+      <button onClick={upload}>Upload</button>
+      <div className="status">{status}</div>
+    </div>
+  );
+}
+
+// src/components/QuizUI.jsx
+import React, { useState } from 'react';
+
+export default function QuizUI() {
+  const [topic, setTopic] = useState('');
+  const [quiz, setQuiz] = useState(null);
+  const [status, setStatus] = useState('');
+
+  const generateQuiz = async () => {
+    if (!topic.trim()) return setStatus('Enter a topic');
+    setStatus('Generating quiz...');
+    try {
+      const resp = await fetch('/generate-quiz', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic })
+      });
+      const data = await resp.json();
+      setQuiz(data.quiz);
+      setStatus('Quiz generated');
+    } catch (err) {
+      setStatus('Error generating quiz');
+    }
+  };
+
+  return (
+    <div className="quiz-ui">
+      <h3>Quiz Generator</h3>
+      <input placeholder="Topic (e.g., Chain Rule)" value={topic} onChange={e => setTopic(e.target.value)} />
+      <button onClick={generateQuiz}>Generate Quiz</button>
+      <div className="status">{status}</div>
+
+      {quiz && (
+        <div className="quiz">
+          <h4>{quiz.title}</h4>
+          <ol>
+            {quiz.questions.map(q => (
+              <li key={q.id}>{q.q} {q.options ? <div>Options: {q.options.join(', ')}</div> : null}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// src/styles.css
+body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
+.app-header { background:#1f2937; color: white; padding: 12px 20px; }
+.app-main { display:flex; gap:16px; padding: 20px; }
+.left-panel { width: 320px; }
+.right-panel { flex:1; }
+.chat-container { border: 1px solid #ddd; border-radius:8px; display:flex; flex-direction:column; height: 70vh; }
+.messages { flex:1; padding:12px; overflow:auto; }
+.message { margin:8px 0; }
+.message.user { text-align:right; }
+.message.bot { text-align:left; }
+.message-text { display:inline-block; padding:8px 12px; border-radius:12px; background:#f3f4f6; }
+.chat-input { display:flex; gap:8px; padding:12px; border-top:1px solid #eee; }
+.chat-input textarea { flex:1; height:48px; resize:none; padding:8px; }
+.chat-input button { padding:8px 16px; }
+.file-upload, .quiz-ui { border:1px solid #eee; padding:12px; border-radius:8px; margin-bottom:12px; }
+
+/* End of frontend code */
